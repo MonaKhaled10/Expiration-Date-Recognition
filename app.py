@@ -1,0 +1,340 @@
+import os
+import time
+from werkzeug.utils import secure_filename
+from paddleocr import PaddleOCR
+import cv2
+import numpy as np
+from ultralytics import YOLO
+import matplotlib.pyplot as plt
+from io import BytesIO
+import base64
+import easyocr
+from datetime import datetime
+from pyngrok import ngrok
+import torch
+import logging
+from flask import Flask, render_template, request, flash, redirect, url_for
+from huggingface_hub import hf_hub_download
+import warnings
+from threading import Lock
+inference_lock = Lock()
+
+# Suppress PaddleOCR warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="paddle.utils.cpp_extension")
+
+# Initialize Flask app
+app = Flask(__name__)
+app.secret_key = 'a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6'
+
+# Configuration (same as your standalone script)
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
+UPLOAD_FOLDER = 'static/uploads'
+CROPPED_FOLDER = 'static/cropped_images'
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(CROPPED_FOLDER, exist_ok=True)
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['CROPPED_FOLDER'] = CROPPED_FOLDER
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def initialize_models():
+    try:
+        import paddle
+        use_gpu = paddle.device.is_compiled_with_cuda()
+        if use_gpu:
+            logger.info(f"Using GPU: {paddle.device.get_device()}")
+        else:
+            logger.warning("PaddlePaddle not compiled with CUDA. Using CPU.")
+        
+        # Initialize YOLO model
+        model_path = hf_hub_download(
+            repo_id="Moankhaled10/expiry-detection",
+            filename="best.pt",
+            cache_dir="model_weights"
+        )
+        yolo_model = YOLO(model_path)
+        
+        # Initialize PaddleOCR
+        paddle_ocr = PaddleOCR(
+            use_angle_cls=True,
+            lang='en',
+            det_db_score_mode="slow",
+            det_db_unclip_ratio=2.0,
+            use_gpu=True,  # Suitable for Tesla T4 (16GB)
+            cpu_threads=6 if not use_gpu else None  # Reduce threads for CPU
+        )
+        
+        # Initialize EasyOCR
+        easy_reader = easyocr.Reader(['en'], gpu=use_gpu)
+        
+        # Warm-up PaddleOCR
+        logger.info("Running PaddleOCR warm-up inference")
+        dummy_image = np.zeros((100, 100, 3), dtype=np.uint8)
+        paddle_ocr.ocr(dummy_image, cls=True)
+        logger.info("PaddleOCR warm-up completed")
+        
+        return yolo_model, paddle_ocr, easy_reader
+        
+    except Exception as e:
+        logger.critical(f"Model initialization failed: {e}", exc_info=True)
+        raise
+
+
+# Initialize models at startup
+yolo_model, paddle_ocr, easy_reader = initialize_models()
+
+
+# Helper functions
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+# EXACT SAME helper functions as your standalone script
+def crop_image(image, bbox):
+    """Crop image to the bounding box coordinates with padding."""
+    x1, y1, x2, y2 = map(int, bbox)
+    padding = 17
+    x1, y1 = max(0, x1 - padding), max(0, y1 - padding)
+    x2, y2 = min(image.shape[1], x2 + padding), min(image.shape[0], y2 + padding)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return image[y1:y2, x1:x2]
+
+def preprocess_image(image):
+    """EXACT SAME preprocessing as standalone script"""
+    if image is None:
+        return None
+    # Convert to grayscale
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    # Apply CLAHE
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    # Resize and sharpen
+    resized = cv2.resize(enhanced, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+    sharpened = cv2.filter2D(resized, -1, kernel)
+    return sharpened
+
+def extract_text_from_region(image, output_dir, cls_name, detection_num):
+    """EXACT SAME extraction logic as standalone script"""
+    if image is None or image.size == 0:
+        return [], None
+
+    # Same preprocessing
+    processed_image = preprocess_image(image)
+    if processed_image is None:
+        return [], None
+
+    # Save cropped image (same as standalone)
+    crop_filename = os.path.join(output_dir, f"cropped_{cls_name}_{detection_num}.jpg")
+    cv2.imwrite(crop_filename, processed_image)
+    logger.info(f"Saved cropped image: {crop_filename}")
+
+    # Convert to RGB for OCR (same as standalone)
+    image_rgb = cv2.cvtColor(processed_image, cv2.COLOR_BGR2RGB)
+    extracted_text = []
+    
+    # Run PaddleOCR (same logic as standalone)
+    result = paddle_ocr.ocr(image_rgb, cls=True)
+    if result[0] is not None:
+        for line in result[0]:
+            text = line[1][0]
+            confidence = line[1][1]
+            if confidence > 0.6:  # Same confidence threshold
+                extracted_text.append((text, confidence))
+
+    # If PaddleOCR fails, try EasyOCR (same fallback as standalone)
+    if not extracted_text:
+        easy_results = easy_reader.readtext(processed_image)
+        extracted_text = [(text, conf) for _, text, conf in easy_results if conf > 0.6]
+
+    return extracted_text, crop_filename
+
+def process_image(image, output_dir, filename):
+    """Process image with EXACT SAME logic as standalone script"""
+    try:
+        # Same confidence threshold as standalone
+        results = yolo_model.predict(source=image, conf=0.5)
+    except Exception as e:
+        logger.error(f"YOLO inference error: {e}")
+        return {'error': f"YOLO inference error: {str(e)}"}
+
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    detections = 0
+    detection_results = []
+    cropped_images = []
+
+    # Create visualization (same as standalone)
+    fig = plt.figure(figsize=(15, 10))
+    ax_main = fig.add_subplot(1, 2, 1)
+    ax_main.imshow(image_rgb)
+    ax_main.set_title(f"Detections for {filename}")
+    ax_main.axis('off')
+
+    for result in results:
+        for box in result.boxes:
+            cls_name = result.names[int(box.cls)]
+            # Process only 'date' class (same as standalone)
+            if cls_name != 'date':
+                continue
+            detections += 1
+            conf = box.conf.item()
+            bbox = box.xyxy[0].cpu().numpy()
+
+            cropped_region = crop_image(image, bbox)
+            text_results, crop_filename = extract_text_from_region(
+                cropped_region, output_dir, cls_name, detections)
+
+            detection_results.append({
+                'class': cls_name,
+                'confidence': float(conf),
+                'bbox': bbox.tolist(),
+                'text': text_results,
+                'crop_path': crop_filename
+            })
+
+            # Add to visualization (same as standalone)
+            x1, y1, x2, y2 = bbox
+            rect = plt.Rectangle((x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor='red', linewidth=2)
+            ax_main.add_patch(rect)
+
+            text_label = f"Date #{detections} (Conf: {conf:.2f})\n"
+            if text_results:
+                text_label += "\n".join([f"{text} (OCR: {text_conf:.2f})" for text, text_conf in text_results])
+            else:
+                text_label += "No text detected"
+            ax_main.text(x1, y1 - 10, text_label, bbox=dict(facecolor='white', alpha=0.8), fontsize=10, color='black')
+
+            if cropped_region is not None:
+                cropped_rgb = cv2.cvtColor(cropped_region, cv2.COLOR_BGR2RGB)
+                cropped_rgb = cv2.resize(cropped_rgb, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+                cropped_images.append({
+                    'image': cropped_rgb,
+                    'path': crop_filename,
+                    'text': text_results
+                })
+
+    if detections == 0:
+        detection_results.append({'message': 'No date regions detected'})
+
+    # Visualize cropped images (same as standalone)
+    if cropped_images:
+        num_crops = len(cropped_images)
+        for i, cropped_data in enumerate(cropped_images):
+            ax_crop = fig.add_subplot(num_crops, 2, 2 * (i + 1))
+            ax_crop.imshow(cropped_data['image'])
+            title = f"Cropped Date #{i+1}\n"
+            title += "\n".join([f"{text} (OCR: {conf:.2f})" for text, conf in cropped_data['text']]) if cropped_data['text'] else "No text"
+            ax_crop.set_title(title)
+            ax_crop.axis('off')
+
+    # Save visualization to base64
+    try:
+        plt.tight_layout()
+        buf = BytesIO()
+        plt.savefig(buf, format='png', bbox_inches='tight', dpi=150)
+        plt.close()
+        buf.seek(0)
+        visualization = base64.b64encode(buf.read()).decode('utf-8')
+    except Exception as e:
+        logger.error(f"Visualization error: {e}")
+        visualization = None
+
+    return {
+        'detections': detection_results,
+        'cropped_images': cropped_images,
+        'visualization': visualization,
+        'num_detections': detections
+    }
+
+# Flask routes
+@app.route('/', methods=['GET', 'POST'])
+def upload_file():
+    global yolo_model, paddle_ocr, easy_reader
+    # Reset models (optional)
+    yolo_model, paddle_ocr, easy_reader = initialize_models()
+    if request.method == 'POST':
+        if 'file' not in request.files:
+            flash('No file selected')
+            return redirect(request.url)
+
+        file = request.files['file']
+        if not (file and allowed_file(file.filename)):
+            flash('Invalid file type')
+            return redirect(request.url)
+
+        try:
+            filename = secure_filename(file.filename)
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(filepath)
+
+            image = cv2.imread(filepath)
+            if image is None:
+                raise ValueError("Invalid image file")
+
+            result = process_image(image, app.config['CROPPED_FOLDER'], filename)
+            result['original_image'] = filepath
+
+            return render_template('results.html', 
+                               filename=filename, 
+                               result=result)
+
+        except Exception as e:
+            logger.error(f"Processing failed: {e}")
+            flash(f'Error: {str(e)}')
+            return redirect(request.url)
+
+    return render_template('upload.html')
+
+@app.route('/capture', methods=['GET', 'POST'])
+def capture():
+    global yolo_model, paddle_ocr, easy_reader
+    # Reset models (optional)
+    yolo_model, paddle_ocr, easy_reader = initialize_models()
+    if request.method == 'POST':
+        image_data = request.form.get('image_data')
+        if not image_data:
+            flash('No image data received')
+            return redirect(url_for('capture'))
+
+        try:
+            header, encoded = image_data.split(",", 1)
+            image_bytes = base64.b64decode(encoded)
+            if len(image_bytes) > 12 * 1024 * 1024:
+                flash('Image too large (max 12MB)')
+                return redirect(url_for('capture'))
+
+            nparr = np.frombuffer(image_bytes, np.uint8)
+            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if image is None:
+                flash('Could not decode image')
+                return redirect(url_for('capture'))
+
+            filename = f"capture_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            cv2.imwrite(filepath, image)
+
+            result = process_image(image, app.config['CROPPED_FOLDER'], filename)
+            result['original_image'] = filepath
+
+            return render_template('results.html', filename=filename, result=result)
+
+        except Exception as e:
+            logger.error(f"Capture processing error: {e}")
+            flash(f'Error processing image: {str(e)}')
+            return redirect(url_for('capture'))
+
+    return render_template('capture.html')
+
+try:
+    public_url = ngrok.connect(5000, "http").public_url
+    logger.info(f"Ngrok tunnel established: {public_url}")
+    print(f"Ngrok tunnel established: {public_url}")
+except Exception as e:
+    logger.error(f"Ngrok error: {str(e)}", exc_info=True)
+    print(f"Ngrok error: {str(e)}")
+    
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, threaded=False)

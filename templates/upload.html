@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Expiration Date Detection</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .container { display: flex; flex-direction: column; align-items: center; }
+        .upload-box { border: 2px dashed #ccc; padding: 20px; text-align: center; margin: 20px 0; width: 100%; }
+        .btn { background-color: #4CAF50; color: white; padding: 10px 20px; border: none; cursor: pointer; margin: 10px; }
+        .nav { display: flex; justify-content: space-around; width: 100%; margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Expiration Date Detection</h1>
+        
+        <div class="nav">
+            <a href="/" class="btn">Upload Image</a>
+            <a href="/capture" class="btn">Capture from Camera</a>
+        </div>
+        
+        <div class="upload-box">
+            <h2>Upload an Image</h2>
+            <form method="post" enctype="multipart/form-data" onsubmit="return validateFile()">
+                <input type="file" name="file" id="fileInput" accept="image/*" required>
+                <br><br>
+                <input type="submit" value="Process Image" class="btn">
+            </form>
+        </div>
+        
+        {% with messages = get_flashed_messages() %}
+            {% if messages %}
+                <ul>
+                {% for message in messages %}
+                    <li style="color: red;">{{ message }}</li>
+                {% endfor %}
+                </ul>
+            {% endif %}
+        {% endwith %}
+    </div>
+    
+    <script>
+        function validateFile() {
+            const fileInput = document.getElementById('fileInput');
+            if (fileInput.files[0].size > 16 * 1024 * 1024) {
+                alert('File too large (maximum 16MB allowed)');
+                return false;
+            }
+            return true;
+        }
+    </script>
+</body>
+</html>

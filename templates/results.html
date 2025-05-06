@@ -1,0 +1,44 @@
+<!-- templates/results.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Detection Results</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 1000px; margin: 0 auto; padding: 20px; }
+        .container { display: flex; flex-direction: column; align-items: center; }
+        .result-image { max-width: 100%; margin: 20px 0; }
+        .detection { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        .btn { background-color: #4CAF50; color: white; padding: 10px 20px; border: none; cursor: pointer; margin: 10px; text-decoration: none; display: inline-block; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Detection Results for {{ filename }}</h1>
+
+        <img src="data:image/png;base64,{{ result.visualization }}" class="result-image" alt="Detection Results">
+
+        {% if result.detections %}
+            <h2>Detected Expiration Dates:</h2>
+            {% for detection in result.detections %}
+                <div class="detection">
+                    <h3>Date #{{ loop.index }} (Confidence: {{ "%.2f"|format(detection.confidence*100) }}%)</h3>
+                    {% if detection.text %}
+                        <p>Extracted Text:</p>
+                        <ul>
+                            {% for text, conf in detection.text %}
+                                <li>{{ text }} (OCR Confidence: {{ "%.2f"|format(conf*100) }}%)</li>
+                            {% endfor %}
+                        </ul>
+                    {% else %}
+                        <p>No text detected in this region.</p>
+                    {% endif %}
+                </div>
+            {% endfor %}
+        {% else %}
+            <p>No expiration dates detected in this image.</p>
+        {% endif %}
+
+        <a href="/" class="btn">Process Another Image</a>
+    </div>
+</body>
+</html>
