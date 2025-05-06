@@ -10,23 +10,23 @@ from io import BytesIO
 import base64
 import easyocr
 from datetime import datetime
-from pyngrok import ngrok
+# from pyngrok import ngrok
 import torch
 import logging
 from flask import Flask, render_template, request, flash, redirect, url_for
 from huggingface_hub import hf_hub_download
 import warnings
+
 from threading import Lock
 inference_lock = Lock()
 
-# Suppress PaddleOCR warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="paddle.utils.cpp_extension")
 
 # Initialize Flask app
 app = Flask(__name__)
 app.secret_key = 'a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6'
 
-# Configuration (same as your standalone script)
+# Configuration 
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
 UPLOAD_FOLDER = 'static/uploads'
 CROPPED_FOLDER = 'static/cropped_images'
@@ -63,7 +63,7 @@ def initialize_models():
             lang='en',
             det_db_score_mode="slow",
             det_db_unclip_ratio=2.0,
-            use_gpu=True,  # Suitable for Tesla T4 (16GB)
+            use_gpu=True,  
             cpu_threads=6 if not use_gpu else None  # Reduce threads for CPU
         )
         
@@ -91,7 +91,6 @@ yolo_model, paddle_ocr, easy_reader = initialize_models()
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-# EXACT SAME helper functions as your standalone script
 def crop_image(image, bbox):
     """Crop image to the bounding box coordinates with padding."""
     x1, y1, x2, y2 = map(int, bbox)
@@ -127,16 +126,16 @@ def extract_text_from_region(image, output_dir, cls_name, detection_num):
     if processed_image is None:
         return [], None
 
-    # Save cropped image (same as standalone)
+    # Save cropped image 
     crop_filename = os.path.join(output_dir, f"cropped_{cls_name}_{detection_num}.jpg")
     cv2.imwrite(crop_filename, processed_image)
     logger.info(f"Saved cropped image: {crop_filename}")
 
-    # Convert to RGB for OCR (same as standalone)
+    # Convert to RGB for OCR
     image_rgb = cv2.cvtColor(processed_image, cv2.COLOR_BGR2RGB)
     extracted_text = []
     
-    # Run PaddleOCR (same logic as standalone)
+    # Run PaddleOCR 
     result = paddle_ocr.ocr(image_rgb, cls=True)
     if result[0] is not None:
         for line in result[0]:
@@ -145,7 +144,7 @@ def extract_text_from_region(image, output_dir, cls_name, detection_num):
             if confidence > 0.6:  # Same confidence threshold
                 extracted_text.append((text, confidence))
 
-    # If PaddleOCR fails, try EasyOCR (same fallback as standalone)
+    # If PaddleOCR fails, try EasyOCR
     if not extracted_text:
         easy_results = easy_reader.readtext(processed_image)
         extracted_text = [(text, conf) for _, text, conf in easy_results if conf > 0.6]
@@ -166,7 +165,7 @@ def process_image(image, output_dir, filename):
     detection_results = []
     cropped_images = []
 
-    # Create visualization (same as standalone)
+    # Create visualization
     fig = plt.figure(figsize=(15, 10))
     ax_main = fig.add_subplot(1, 2, 1)
     ax_main.imshow(image_rgb)
@@ -176,7 +175,7 @@ def process_image(image, output_dir, filename):
     for result in results:
         for box in result.boxes:
             cls_name = result.names[int(box.cls)]
-            # Process only 'date' class (same as standalone)
+            # Process only 'date' class
             if cls_name != 'date':
                 continue
             detections += 1
@@ -195,7 +194,7 @@ def process_image(image, output_dir, filename):
                 'crop_path': crop_filename
             })
 
-            # Add to visualization (same as standalone)
+            # Add to visualization 
             x1, y1, x2, y2 = bbox
             rect = plt.Rectangle((x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor='red', linewidth=2)
             ax_main.add_patch(rect)
@@ -219,7 +218,7 @@ def process_image(image, output_dir, filename):
     if detections == 0:
         detection_results.append({'message': 'No date regions detected'})
 
-    # Visualize cropped images (same as standalone)
+    # Visualize cropped images
     if cropped_images:
         num_crops = len(cropped_images)
         for i, cropped_data in enumerate(cropped_images):
@@ -328,13 +327,13 @@ def capture():
 
     return render_template('capture.html')
 
-try:
-    public_url = ngrok.connect(5000, "http").public_url
-    logger.info(f"Ngrok tunnel established: {public_url}")
-    print(f"Ngrok tunnel established: {public_url}")
-except Exception as e:
-    logger.error(f"Ngrok error: {str(e)}", exc_info=True)
-    print(f"Ngrok error: {str(e)}")
+# try:
+#     public_url = ngrok.connect(5000, "http").public_url
+#     logger.info(f"Ngrok tunnel established: {public_url}")
+#     print(f"Ngrok tunnel established: {public_url}")
+# except Exception as e:
+#     logger.error(f"Ngrok error: {str(e)}", exc_info=True)
+#     print(f"Ngrok error: {str(e)}")
     
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, threaded=False)
