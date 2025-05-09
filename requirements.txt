@@ -6,4 +6,4 @@ easyocr>=1.4.0
 huggingface-hub>=0.4.0
 opencv-python>=4.5.0
 paddlepaddle>=2.4.0  
-python==3.11.12
+
