@@ -59,11 +59,12 @@ def initialize_models():
         
         # Initialize PaddleOCR
         paddle_ocr = PaddleOCR(
-            use_angle_cls=True,
+            use_angle_cls=False,
             lang='en',
             det_db_score_mode="slow",
             det_db_unclip_ratio=2.0,
-            use_gpu=True,  
+            use_gpu=False,
+            enable_mkldnn=True,
             cpu_threads=6 if not use_gpu else None  # Reduce threads for CPU
         )
         
