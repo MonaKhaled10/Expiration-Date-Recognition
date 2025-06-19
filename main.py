@@ -15,7 +15,7 @@ import logging
 from flask import Flask, render_template, request, flash, redirect, url_for
 from huggingface_hub import hf_hub_download
 import warnings
-
+import cv2
 from threading import Lock
 inference_lock = Lock()
 
