@@ -1,58 +1,39 @@
-# Use Ubuntu 24.04 as the base image for ARM64 compatibility
-FROM ubuntu:24.04
+FROM python:3.11-slim
 
-# Set environment variables to avoid interactive prompts
-ENV DEBIAN_FRONTEND=noninteractive
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+ENV FLASK_APP=main.py
+ENV FLASK_ENV=production
 
-# Install system dependencies for Python 3.11, Tesseract, OpenCV, and PaddleOCR
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
-    python3.11 \
-    python3.11-dev \
-    python3-pip \
-    tesseract-ocr \
-    libtesseract-dev \
-    libopencv-dev \
-    python3-opencv \
-    tesseract-ocr-eng \
-    build-essential \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    gcc \
     g++ \
-    cmake \
-    libpng-dev \
-    libjpeg-dev \
-    libtiff-dev \
-    libopenjp2-7-dev \
-    libwebp-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Set the working directory
+# Create and set working directory
 WORKDIR /app
 
-# Copy the requirements file
+# Copy requirements first to leverage Docker cache
 COPY requirements.txt .
 
 # Install Python dependencies
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Hugging Face CLI to download the YOLO model
-RUN pip3 install --no-cache-dir huggingface_hub[cli]
-
-# Download the YOLO model from Hugging Face
-RUN huggingface-cli download Moankhaled10/expiry-detection best.pt --local-dir model_weights --cache-dir model_weights/cache
-
-# Copy the entire application code
+# Copy the rest of the application
 COPY . .
 
-# Create static directories for uploads and cropped images
-RUN mkdir -p static/uploads static/cropped_images
+# Create directories for uploads
+RUN mkdir -p /app/static/uploads /app/static/cropped_images /app/model_weights
 
-# Set environment variables for Flask and PaddleOCR
-ENV FLASK_APP=main.py
-ENV FLASK_ENV=production
-ENV PYTHONUNBUFFERED=1
-ENV PADDLE_NUM_THREADS=4
-
-# Expose the Flask port
+# Expose the port the app runs on
 EXPOSE 5000
 
-# Run the app with Gunicorn
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers=2", "--threads=2", "main:app"]
+# Command to run the application
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "4", "main:app"]
