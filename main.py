@@ -42,10 +42,7 @@ def initialize_models():
     try:
         import paddle
         use_gpu = paddle.device.is_compiled_with_cuda()
-        if use_gpu:
-            logger.info(f"Using GPU: {paddle.device.get_device()}")
-        else:
-            logger.warning("PaddlePaddle not compiled with CUDA. Using CPU.")
+        logger.info(f"Using GPU: {use_gpu}")
         
         model_path = hf_hub_download(
             repo_id="Moankhaled10/expiry-detection",
@@ -53,18 +50,22 @@ def initialize_models():
             cache_dir="model_weights"
         )
         yolo_model = YOLO(model_path)
+        logger.info("Successfully initialized YOLO model")
         
-        # Initialize PaddleOCR with det_db_unclip_ratio
         paddle_ocr = PaddleOCR(
             use_angle_cls=False,
             lang='en',
             use_gpu=False,
             det_db_score_mode="fast",
-            det_db_unclip_ratio=2.0,  # Set here
-            cpu_threads=6 if not use_gpu else None
+            det_db_unclip_ratio=2.0,
+            cpu_threads=6,
+            det_model_dir="/root/.paddleocr/whl/det/en/en_PP-OCRv3_det_infer",
+            rec_model_dir="/root/.paddleocr/whl/rec/en/en_PP-OCRv3_rec_infer"
         )
+        logger.info("Successfully initialized PaddleOCR")
         
         easy_reader = easyocr.Reader(['en'], gpu=use_gpu)
+        logger.info("Successfully initialized EasyOCR")
         
         logger.info("Running PaddleOCR warm-up inference")
         dummy_image = np.zeros((100, 100, 3), dtype=np.uint8)
