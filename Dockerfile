@@ -54,4 +54,4 @@ RUN chmod -R 755 /app/static /app/model_weights
 EXPOSE 5000
 
 # Command to run the application with increased timeout and single worker
-CMD ["gunicorn", "--bind", "0.0.0.0:$PORT", "--workers", "1", "--timeout", "180", "--log-level", "debug", "main:app"]
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-5000} --workers 1 --timeout 240 --log-level debug main:app"]
