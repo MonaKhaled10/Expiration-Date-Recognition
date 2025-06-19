@@ -8,3 +8,4 @@ huggingface-hub>=0.4.0
 opencv-python>=4.5.0
 paddlepaddle>=2.4.0
 flask>=2.0.0
+gunicorn==21.2.0
