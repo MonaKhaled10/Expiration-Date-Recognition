@@ -10,7 +10,6 @@ from io import BytesIO
 import base64
 import easyocr
 from datetime import datetime
-# from pyngrok import ngrok
 import torch
 import logging
 from flask import Flask, render_template, request, flash, redirect, url_for
@@ -39,7 +38,6 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 def initialize_models():
     try:
         import paddle
@@ -49,7 +47,6 @@ def initialize_models():
         else:
             logger.warning("PaddlePaddle not compiled with CUDA. Using CPU.")
         
-        # Initialize YOLO model
         model_path = hf_hub_download(
             repo_id="Moankhaled10/expiry-detection",
             filename="best.pt",
@@ -57,21 +54,19 @@ def initialize_models():
         )
         yolo_model = YOLO(model_path)
         
-        # Initialize PaddleOCR
+        # Initialize PaddleOCR with det_db_unclip_ratio
         paddle_ocr = PaddleOCR(
             use_angle_cls=False,
             lang='en',
-            det_db_score_mode="slow",
-            det_db_unclip_ratio=2.0,
             use_gpu=False,
             enable_mkldnn=True,
-            cpu_threads=6 if not use_gpu else None  # Reduce threads for CPU
+            det_db_score_mode="fast",
+            det_db_unclip_ratio=2.0,  # Set here
+            cpu_threads=6 if not use_gpu else None
         )
         
-        # Initialize EasyOCR
         easy_reader = easyocr.Reader(['en'], gpu=use_gpu)
         
-        # Warm-up PaddleOCR
         logger.info("Running PaddleOCR warm-up inference")
         dummy_image = np.zeros((100, 100, 3), dtype=np.uint8)
         paddle_ocr.ocr(dummy_image, cls=True)
@@ -82,7 +77,6 @@ def initialize_models():
     except Exception as e:
         logger.critical(f"Model initialization failed: {e}", exc_info=True)
         raise
-
 
 # Initialize models at startup
 yolo_model, paddle_ocr, easy_reader = initialize_models()
@@ -95,7 +89,7 @@ def allowed_file(filename):
 def crop_image(image, bbox):
     """Crop image to the bounding box coordinates with padding."""
     x1, y1, x2, y2 = map(int, bbox)
-    padding = 17
+    padding = 15
     x1, y1 = max(0, x1 - padding), max(0, y1 - padding)
     x2, y2 = min(image.shape[1], x2 + padding), min(image.shape[0], y2 + padding)
     if x2 <= x1 or y2 <= y1:
@@ -116,41 +110,110 @@ def preprocess_image(image):
     kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
     sharpened = cv2.filter2D(resized, -1, kernel)
     return sharpened
-
 def extract_text_from_region(image, output_dir, cls_name, detection_num):
-    """EXACT SAME extraction logic as standalone script"""
+    """Enhanced text extraction with better preprocessing and OCR handling"""
     if image is None or image.size == 0:
         return [], None
 
-    # Same preprocessing
-    processed_image = preprocess_image(image)
-    if processed_image is None:
+    try:
+        # Enhanced preprocessing pipeline
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        processed = cv2.adaptiveThreshold(
+            gray, 255, 
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+            cv2.THRESH_BINARY, 11, 2
+        )
+        processed = cv2.fastNlMeansDenoising(processed, h=10)
+        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+        processed = cv2.filter2D(processed, -1, kernel)
+        kernel = np.ones((2, 2), np.uint8)
+        processed = cv2.dilate(processed, kernel, iterations=1)
+        
+        crop_filename = os.path.join(output_dir, f"cropped_{cls_name}_{detection_num}_preprocessed.jpg")
+        cv2.imwrite(crop_filename, processed)
+        
+        extracted_text = []
+        
+        # Try PaddleOCR with compatible parameters
+        for attempt in range(2):
+            try:
+                result = paddle_ocr.ocr(
+                    processed if attempt == 0 else cv2.cvtColor(image, cv2.COLOR_BGR2RGB),
+                    cls=True,
+                    det_db_box_thresh=0.7 if attempt == 0 else 0.5,
+                    rec_image_shape="3, 64, 320" if attempt == 0 else "3, 48, 320"
+                )
+                
+                if result and result[0]:
+                    for line in result[0]:
+                        if line and len(line) >= 2:
+                            text_info = line[1]
+                            if isinstance(text_info, (list, tuple)) and len(text_info) >= 2:
+                                text = str(text_info[0]).strip()
+                                confidence = float(text_info[1])
+                                if confidence > 0.5 and text:
+                                    extracted_text.append((text, confidence))
+                    if extracted_text:
+                        break
+            except Exception as e:
+                logger.warning(f"PaddleOCR attempt {attempt} failed: {str(e)}")
+                continue
+
+        # Fallback to EasyOCR
+        if not extracted_text:
+            try:
+                for preprocess_type in [0, 1, 2]:
+                    if preprocess_type == 0:
+                        easy_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                    elif preprocess_type == 1:
+                        easy_image = cv2.cvtColor(processed, cv2.COLOR_GRAY2RGB)
+                    else:
+                        easy_image = cv2.bitwise_not(processed)
+                        easy_image = cv2.cvtColor(easy_image, cv2.COLOR_GRAY2RGB)
+                    
+                    easy_results = easy_reader.readtext(
+                        easy_image,
+                        detail=1,
+                        paragraph=False,
+                        min_size=10,
+                        slope_ths=0.3,
+                        ycenter_ths=0.5,
+                        height_ths=0.5,
+                        width_ths=0.5,
+                        decoder='beamsearch',
+                        beamWidth=5
+                    )
+                    
+                    for _, text, conf in easy_results:
+                        text = str(text).strip()
+                        if text and conf > 0.4:
+                            extracted_text.append((text, conf))
+                    
+                    if extracted_text:
+                        break
+            except Exception as e:
+                logger.error(f"EasyOCR failed: {str(e)}")
+
+        # Post-process extracted text
+        if extracted_text:
+            merged_texts = {}
+            for text, conf in extracted_text:
+                text_lower = text.lower()
+                if text_lower in merged_texts:
+                    if conf > merged_texts[text_lower][1]:
+                        merged_texts[text_lower] = (text, conf)
+                else:
+                    merged_texts[text_lower] = (text, conf)
+            
+            extracted_text = list(merged_texts.values())
+            extracted_text.sort(key=lambda x: x[1], reverse=True)
+
+        return extracted_text, crop_filename
+
+    except Exception as e:
+        logger.error(f"Extraction failed: {str(e)}")
         return [], None
-
-    # Save cropped image 
-    crop_filename = os.path.join(output_dir, f"cropped_{cls_name}_{detection_num}.jpg")
-    cv2.imwrite(crop_filename, processed_image)
-    logger.info(f"Saved cropped image: {crop_filename}")
-
-    # Convert to RGB for OCR
-    image_rgb = cv2.cvtColor(processed_image, cv2.COLOR_BGR2RGB)
-    extracted_text = []
-    
-    # Run PaddleOCR 
-    result = paddle_ocr.ocr(image_rgb, cls=True)
-    if result[0] is not None:
-        for line in result[0]:
-            text = line[1][0]
-            confidence = line[1][1]
-            if confidence > 0.6:  # Same confidence threshold
-                extracted_text.append((text, confidence))
-
-    # If PaddleOCR fails, try EasyOCR
-    if not extracted_text:
-        easy_results = easy_reader.readtext(processed_image)
-        extracted_text = [(text, conf) for _, text, conf in easy_results if conf > 0.6]
-
-    return extracted_text, crop_filename
+        
 
 def process_image(image, output_dir, filename):
     """Process image with EXACT SAME logic as standalone script"""
@@ -173,62 +236,75 @@ def process_image(image, output_dir, filename):
     ax_main.set_title(f"Detections for {filename}")
     ax_main.axis('off')
 
-    for result in results:
-        for box in result.boxes:
-            cls_name = result.names[int(box.cls)]
-            # Process only 'date' class
-            if cls_name != 'date':
-                continue
-            detections += 1
-            conf = box.conf.item()
-            bbox = box.xyxy[0].cpu().numpy()
+    try:
+        for result in results:
+            for box in result.boxes:
+                cls_name = result.names[int(box.cls)]
+                # Process only 'date' class
+                if cls_name != 'date':
+                    continue
+                detections += 1
+                conf = box.conf.item()
+                bbox = box.xyxy[0].cpu().numpy()
 
-            cropped_region = crop_image(image, bbox)
-            text_results, crop_filename = extract_text_from_region(
-                cropped_region, output_dir, cls_name, detections)
+                cropped_region = crop_image(image, bbox)
+                if cropped_region is None:
+                    continue
 
-            detection_results.append({
-                'class': cls_name,
-                'confidence': float(conf),
-                'bbox': bbox.tolist(),
-                'text': text_results,
-                'crop_path': crop_filename
-            })
+                try:
+                    text_results, crop_filename = extract_text_from_region(
+                        cropped_region, output_dir, cls_name, detections)
+                except Exception as e:
+                    logger.error(f"OCR extraction error: {e}")
+                    text_results = []
+                    crop_filename = None
 
-            # Add to visualization 
-            x1, y1, x2, y2 = bbox
-            rect = plt.Rectangle((x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor='red', linewidth=2)
-            ax_main.add_patch(rect)
-
-            text_label = f"Date #{detections} (Conf: {conf:.2f})\n"
-            if text_results:
-                text_label += "\n".join([f"{text} (OCR: {text_conf:.2f})" for text, text_conf in text_results])
-            else:
-                text_label += "No text detected"
-            ax_main.text(x1, y1 - 10, text_label, bbox=dict(facecolor='white', alpha=0.8), fontsize=10, color='black')
-
-            if cropped_region is not None:
-                cropped_rgb = cv2.cvtColor(cropped_region, cv2.COLOR_BGR2RGB)
-                cropped_rgb = cv2.resize(cropped_rgb, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-                cropped_images.append({
-                    'image': cropped_rgb,
-                    'path': crop_filename,
-                    'text': text_results
+                detection_results.append({
+                    'class': cls_name,
+                    'confidence': float(conf),
+                    'bbox': bbox.tolist(),
+                    'text': text_results,
+                    'crop_path': crop_filename
                 })
 
-    if detections == 0:
-        detection_results.append({'message': 'No date regions detected'})
+                # Add to visualization 
+                x1, y1, x2, y2 = bbox
+                rect = plt.Rectangle((x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor='red', linewidth=2)
+                ax_main.add_patch(rect)
 
-    # Visualize cropped images
-    if cropped_images:
-        num_crops = len(cropped_images)
-        for i, cropped_data in enumerate(cropped_images):
-            ax_crop = fig.add_subplot(num_crops, 2, 2 * (i + 1))
-            ax_crop.imshow(cropped_data['image'])
-            title = f"Cropped Date #{i+1}\n"
-            title += "\n".join([f"{text} (OCR: {conf:.2f})" for text, conf in cropped_data['text']]) if cropped_data['text'] else "No text"
-            ax_crop.set_title(title)
-            ax_crop.axis('off')
+                text_label = f"Date #{detections} (Conf: {conf:.2f})\n"
+                if text_results:
+                    text_label += "\n".join([f"{text} (OCR: {text_conf:.2f})" for text, text_conf in text_results])
+                else:
+                    text_label += "No text detected"
+                ax_main.text(x1, y1 - 10, text_label, bbox=dict(facecolor='white', alpha=0.8), fontsize=10, color='black')
+
+                if cropped_region is not None and crop_filename:
+                    cropped_rgb = cv2.cvtColor(cropped_region, cv2.COLOR_BGR2RGB)
+                    cropped_rgb = cv2.resize(cropped_rgb, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+                    cropped_images.append({
+                        'image': cropped_rgb,
+                        'path': crop_filename,
+                        'text': text_results
+                    })
+
+        if detections == 0:
+            detection_results.append({'message': 'No date regions detected'})
+
+        # Visualize cropped images
+        if cropped_images:
+            num_crops = len(cropped_images)
+            for i, cropped_data in enumerate(cropped_images):
+                ax_crop = fig.add_subplot(num_crops, 2, 2 * (i + 1))
+                ax_crop.imshow(cropped_data['image'])
+                title = f"Cropped Date #{i+1}\n"
+                title += "\n".join([f"{text} (OCR: {conf:.2f})" for text, conf in cropped_data['text']]) if cropped_data['text'] else "No text"
+                ax_crop.set_title(title)
+                ax_crop.axis('off')
+
+    except Exception as e:
+        logger.error(f"Processing error: {e}")
+        return {'error': f"Processing error: {str(e)}"}
 
     # Save visualization to base64
     try:
@@ -328,13 +404,10 @@ def capture():
 
     return render_template('capture.html')
 
-# try:
-#     public_url = ngrok.connect(5000, "http").public_url
-#     logger.info(f"Ngrok tunnel established: {public_url}")
-#     print(f"Ngrok tunnel established: {public_url}")
-# except Exception as e:
-#     logger.error(f"Ngrok error: {str(e)}", exc_info=True)
-#     print(f"Ngrok error: {str(e)}")
-    
+
+
+
 if __name__ == '__main__':
+    
+    # Run Flask app
     app.run(host='0.0.0.0', port=5000, threaded=False)
