@@ -59,7 +59,6 @@ def initialize_models():
             use_angle_cls=False,
             lang='en',
             use_gpu=False,
-            enable_mkldnn=True,
             det_db_score_mode="fast",
             det_db_unclip_ratio=2.0,  # Set here
             cpu_threads=6 if not use_gpu else None
