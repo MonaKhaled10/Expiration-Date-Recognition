@@ -15,9 +15,7 @@ import logging
 from flask import Flask, render_template, request, flash, redirect, url_for, jsonify
 from huggingface_hub import hf_hub_download
 import warnings
-import cv2
-from threading import Lock
-import uuid
+
 
 warnings.filterwarnings("ignore", category=UserWarning, module="paddle.utils.cpp_extension")
 
@@ -105,7 +103,6 @@ def crop_image(image, bbox):
     return image[y1:y2, x1:x2]
 
 def preprocess_image(image):
-    
     if image is None:
         return None
     # Convert to grayscale
@@ -224,7 +221,6 @@ def extract_text_from_region(image, output_dir, cls_name, detection_num):
         return [], None
 
 def process_image(image, output_dir, filename):
-    
     try:
         # Same confidence threshold as standalone
         results = yolo_model.predict(source=image, conf=0.5)
@@ -253,8 +249,7 @@ def process_image(image, output_dir, filename):
                     continue
                 detections += 1
                 conf = box.conf.item()
-                bbox = box.xyxy[0].cpu().numpy()
-
+                bbox = box.xyxy[0].cpu().numpy().tolist()  # Fixed line
                 cropped_region = crop_image(image, bbox)
                 if cropped_region is None:
                     continue
@@ -270,7 +265,7 @@ def process_image(image, output_dir, filename):
                 detection_results.append({
                     'class': cls_name,
                     'confidence': float(conf),
-                    'bbox': bbox.tolist(),
+                    'bbox': bbox,
                     'text': text_results,
                     'crop_path': crop_filename
                 })
@@ -291,7 +286,7 @@ def process_image(image, output_dir, filename):
                     cropped_rgb = cv2.cvtColor(cropped_region, cv2.COLOR_BGR2RGB)
                     cropped_rgb = cv2.resize(cropped_rgb, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
                     cropped_images.append({
-                        'image': cropped_rgb,
+                        'image': cropped_rgb.tolist(),  # Convert image to list for JSON
                         'path': crop_filename,
                         'text': text_results
                     })
@@ -304,7 +299,7 @@ def process_image(image, output_dir, filename):
             num_crops = len(cropped_images)
             for i, cropped_data in enumerate(cropped_images):
                 ax_crop = fig.add_subplot(num_crops, 2, 2 * (i + 1))
-                ax_crop.imshow(cropped_data['image'])
+                ax_crop.imshow(np.array(cropped_data['image'], dtype=np.uint8))  # Convert back to array for plotting
                 title = f"Cropped Date #{i+1}\n"
                 title += "\n".join([f"{text} (OCR: {conf:.2f})" for text, conf in cropped_data['text']]) if cropped_data['text'] else "No text"
                 ax_crop.set_title(title)
@@ -328,7 +323,9 @@ def process_image(image, output_dir, filename):
 
     return {
         'detections': detection_results,
-        'cropped_images': cropped_images,
+        'cropped_images': [
+            {'path': img['path'], 'text': img['text']} for img in cropped_images  # Exclude image array from JSON
+        ],
         'visualization': visualization,
         'num_detections': detections
     }
@@ -383,12 +380,25 @@ def api_capture():
         return jsonify({'error': 'No image data provided'}), 400
     
     try:
-        image_data = data['image_data']
+        image_data = data['image_data'].strip()
         if not image_data.startswith('data:image/'):
-            return jsonify({'error': 'Invalid image data format'}), 400
+            return jsonify({'error': 'Invalid image data format: Must start with data:image/'}), 400
 
-        header, encoded = image_data.split(",", 1)
-        image_bytes = base64.b64decode(encoded)
+        try:
+            header, encoded = image_data.split(",", 1)
+        except ValueError:
+            return jsonify({'error': 'Invalid image data format: Missing comma separator'}), 400
+
+        encoded = encoded.strip().replace(' ', '+')
+        padding_needed = (4 - len(encoded) % 4) % 4
+        encoded += '=' * padding_needed
+
+        try:
+            image_bytes = base64.b64decode(encoded, validate=True)
+        except base64.binascii.Error as e:
+            logger.error(f"Base64 decode error: {e}")
+            return jsonify({'error': f"Invalid base64 data: {str(e)}"}), 400
+
         if len(image_bytes) > 12 * 1024 * 1024:
             return jsonify({'error': 'Image too large (max 12MB)'}), 400
 
@@ -410,39 +420,156 @@ def api_capture():
         logger.error(f"API capture error: {e}")
         return jsonify({'error': str(e)}), 500
 
-# Web Routes
-@app.route('/', methods=['GET', 'POST'])
-def upload_file():
-    if request.method == 'POST':
-        if 'file' not in request.files:
-            flash('No file selected')
-            return redirect(request.url)
-
+@app.route('/api/process', methods=['POST'])
+def api_process():
+    """API endpoint for processing an image from a file upload or file path"""
+    # Check for file upload
+    if 'file' in request.files:
         file = request.files['file']
-        if not (file and allowed_file(file.filename)):
-            flash('Invalid file type')
-            return redirect(request.url)
-
+        if not file or file.filename == '':
+            return jsonify({'error': 'No selected file'}), 400
+        
+        if not allowed_file(file.filename):
+            return jsonify({'error': 'File type not allowed'}), 400
+        
         try:
+            # Generate unique filename to prevent collisions
             filename = generate_unique_filename(secure_filename(file.filename))
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(filepath)
 
             image = cv2.imread(filepath)
             if image is None:
-                raise ValueError("Invalid image file")
+                return jsonify({'error': 'Invalid image file'}), 400
 
             result = process_image(image, app.config['CROPPED_FOLDER'], filename)
-            result['original_image'] = filepath
+            result['original_image'] = f"/{filepath}"
+            
+            # Save processed image
+            processed_filename = f"processed_{filename}"
+            processed_path = os.path.join(app.config['PROCESSED_FOLDER'], processed_filename)
+            cv2.imwrite(processed_path, image)
+            result['processed_image'] = f"/{processed_path}"
 
-            return render_template('results.html', 
-                               filename=filename, 
-                               result=result)
-
+            return jsonify(result)
+        
         except Exception as e:
-            logger.error(f"Processing failed: {e}")
-            flash(f'Error: {str(e)}')
-            return redirect(request.url)
+            logger.error(f"API processing error: {e}")
+            return jsonify({'error': str(e)}), 500
+
+    # Check for file path (fallback for compatibility)
+    if request.is_json:
+        data = request.get_json()
+        if not data or 'file_path' not in data:
+            return jsonify({'error': 'No file path provided'}), 400
+        
+        file_path = data['file_path']
+        if not os.path.exists(file_path):
+            return jsonify({'error': 'File does not exist'}), 400
+        
+        if not allowed_file(file_path):
+            return jsonify({'error': 'File type not allowed'}), 400
+        
+        if not file_path.startswith(app.config['UPLOAD_FOLDER']):
+            return jsonify({'error': 'File path must be within the uploads directory'}), 400
+        
+        try:
+            image = cv2.imread(file_path)
+            if image is None:
+                return jsonify({'error': 'Invalid image file'}), 400
+
+            filename = os.path.basename(file_path)
+            result = process_image(image, app.config['CROPPED_FOLDER'], filename)
+            result['original_image'] = f"/{file_path}"
+            
+            # Save processed image
+            processed_filename = f"processed_{filename}"
+            processed_path = os.path.join(app.config['PROCESSED_FOLDER'], processed_filename)
+            cv2.imwrite(processed_path, image)
+            result['processed_image'] = f"/{processed_path}"
+
+            return jsonify(result)
+        
+        except Exception as e:
+            logger.error(f"API process error: {e}")
+            return jsonify({'error': str(e)}), 500
+    
+    return jsonify({'error': 'Request must include a file or JSON with file_path'}), 400
+
+# Web Routes
+@app.route('/', methods=['GET', 'POST'])
+def upload_file():
+    if request.method == 'POST':
+        file_path = request.form.get('file_path')
+        if file_path:
+            # Handle file path input
+            if not os.path.exists(file_path):
+                flash('File does not exist')
+                return redirect(url_for('upload_file'))
+
+            if not allowed_file(file_path):
+                flash('Invalid file type')
+                return redirect(url_for('upload_file'))
+
+            if not file_path.startswith(app.config['UPLOAD_FOLDER']):
+                flash('File path must be within the uploads directory')
+                return redirect(url_for('upload_file'))
+
+            try:
+                image = cv2.imread(file_path)
+                if image is None:
+                    flash('Invalid image file')
+                    return redirect(url_for('upload_file'))
+
+                filename = os.path.basename(file_path)
+                result = process_image(image, app.config['CROPPED_FOLDER'], filename)
+                result['original_image'] = file_path
+
+                # Save processed image
+                processed_filename = f"processed_{filename}"
+                processed_path = os.path.join(app.config['PROCESSED_FOLDER'], processed_filename)
+                cv2.imwrite(processed_path, image)
+
+                return render_template('results.html', filename=filename, result=result)
+
+            except Exception as e:
+                logger.error(f"Process file error: {e}")
+                flash(f'Error processing image: {str(e)}')
+                return redirect(url_for('upload_file'))
+
+        elif 'file' in request.files:
+            # Handle file upload
+            file = request.files['file']
+            if not file or file.filename == '':
+                flash('No file selected')
+                return redirect(url_for('upload_file'))
+
+            if not allowed_file(file.filename):
+                flash('Invalid file type')
+                return redirect(url_for('upload_file'))
+
+            try:
+                filename = generate_unique_filename(secure_filename(file.filename))
+                filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+                file.save(filepath)
+
+                image = cv2.imread(filepath)
+                if image is None:
+                    raise ValueError("Invalid image file")
+
+                result = process_image(image, app.config['CROPPED_FOLDER'], filename)
+                result['original_image'] = filepath
+
+                return render_template('results.html', filename=filename, result=result)
+
+            except Exception as e:
+                logger.error(f"Processing failed: {e}")
+                flash(f'Error: {str(e)}')
+                return redirect(url_for('upload_file'))
+
+        else:
+            flash('No file or file path provided')
+            return redirect(url_for('upload_file'))
 
     return render_template('upload.html')
 
@@ -482,6 +609,7 @@ def capture():
             return redirect(url_for('capture'))
 
     return render_template('capture.html')
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, threaded=True)
