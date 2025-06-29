@@ -15,8 +15,7 @@ import logging
 from flask import Flask, render_template, request, flash, redirect, url_for, jsonify
 from huggingface_hub import hf_hub_download
 import warnings
-
-
+import uuid
 warnings.filterwarnings("ignore", category=UserWarning, module="paddle.utils.cpp_extension")
 
 # Initialize Flask app
