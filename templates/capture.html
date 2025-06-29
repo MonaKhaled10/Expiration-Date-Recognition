@@ -1,94 +1,65 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Capture Expiration Date</title>
+    <title>Capture Image</title>
     <style>
-        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-        .container { display: flex; flex-direction: column; align-items: center; }
-        .camera-box { margin: 20px 0; width: 100%; text-align: center; }
+        body { font-family: Arial; max-width: 800px; margin: auto; padding: 20px; }
+        .container { text-align: center; }
         #camera { width: 100%; max-width: 640px; background: #eee; }
-        .btn { background-color: #4CAF50; color: white; padding: 10px 20px; border: none; cursor: pointer; margin: 10px; }
-        .nav { display: flex; justify-content: space-around; width: 100%; margin-bottom: 20px; }
+        .btn {
+            background-color: #4CAF50; color: white;
+            padding: 10px 20px; margin: 5px;
+            border: none; cursor: pointer; text-decoration: none;
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Capture Expiration Date</h1>
-        
+        <h1>Capture Image</h1>
         <div class="nav">
-            <a href="/" class="btn">Upload Image</a>
-            <a href="/capture" class="btn">Capture from Camera</a>
+            <a href="/" class="btn">Upload</a>
+            <a href="/capture" class="btn">Capture</a>
         </div>
-        
-        <div class="camera-box">
-            <video id="camera" autoplay playsinline></video>
-            <br>
-            <button id="capture-btn" class="btn">Capture</button>
-            <form id="capture-form" method="post" style="display: none;">
-                <input type="hidden" name="image_data" id="image-data">
-                <input type="submit" id="submit-btn">
-            </form>
-        </div>
-        
+        <video id="camera" autoplay playsinline></video>
+        <br>
+        <button id="capture-btn" class="btn">Capture</button>
+        <form id="capture-form" method="post" style="display:none;">
+            <input type="hidden" name="image_data" id="image-data">
+            <input type="submit" id="submit-btn">
+        </form>
         {% with messages = get_flashed_messages() %}
             {% if messages %}
                 <ul>
-                {% for message in messages %}
-                    <li style="color: red;">{{ message }}</li>
-                {% endfor %}
+                    {% for message in messages %}
+                        <li style="color: red;">{{ message }}</li>
+                    {% endfor %}
                 </ul>
             {% endif %}
         {% endwith %}
     </div>
-    
     <script>
         const video = document.getElementById('camera');
         const captureBtn = document.getElementById('capture-btn');
         const imageData = document.getElementById('image-data');
         const submitBtn = document.getElementById('submit-btn');
-        let stream = null;
-        
+
         async function startCamera() {
-            try {
-                stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { 
-                        width: { ideal: 1280 },
-                        height: { ideal: 720 },
-                        facingMode: 'environment' 
-                    } 
-                });
-                video.srcObject = stream;
-            } catch (err) {
-                console.error("Error accessing camera:", err);
-                alert("Could not access camera. Please check permissions.");
-            }
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            video.srcObject = stream;
         }
-        
-        window.addEventListener('beforeunload', () => {
-            if (stream) {
-                stream.getTracks().forEach(track => track.stop());
-            }
-        });
-        
-        startCamera();
-        
+
         captureBtn.addEventListener('click', () => {
             const canvas = document.createElement('canvas');
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
             const ctx = canvas.getContext('2d');
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            
-            const dataURL = canvas.toDataURL('image/jpeg', 0.7);
-            
-            if (dataURL.length > 12 * 1024 * 1024) {
-                alert("Image too large. Please move closer or reduce lighting.");
-                return;
-            }
-            
+            ctx.drawImage(video, 0, 0);
+            const dataURL = canvas.toDataURL('image/jpeg');
             imageData.value = dataURL;
             submitBtn.click();
         });
+
+        startCamera();
     </script>
 </body>
 </html>
