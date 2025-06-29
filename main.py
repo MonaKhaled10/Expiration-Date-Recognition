@@ -12,12 +12,12 @@ import easyocr
 from datetime import datetime
 import torch
 import logging
-from flask import Flask, render_template, request, flash, redirect, url_for
+from flask import Flask, render_template, request, flash, redirect, url_for, jsonify
 from huggingface_hub import hf_hub_download
 import warnings
 import cv2
 from threading import Lock
-inference_lock = Lock()
+import uuid
 
 warnings.filterwarnings("ignore", category=UserWarning, module="paddle.utils.cpp_extension")
 
@@ -29,15 +29,19 @@ app.secret_key = 'a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
 UPLOAD_FOLDER = 'static/uploads'
 CROPPED_FOLDER = 'static/cropped_images'
+PROCESSED_FOLDER = 'static/processed'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(CROPPED_FOLDER, exist_ok=True)
+os.makedirs(PROCESSED_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['CROPPED_FOLDER'] = CROPPED_FOLDER
+app.config['PROCESSED_FOLDER'] = PROCESSED_FOLDER
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 def initialize_models():
     try:
         import paddle
@@ -81,10 +85,14 @@ def initialize_models():
 # Initialize models at startup
 yolo_model, paddle_ocr, easy_reader = initialize_models()
 
-
 # Helper functions
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def generate_unique_filename(original_filename):
+    ext = original_filename.rsplit('.', 1)[1].lower()
+    unique_id = uuid.uuid4().hex
+    return f"{unique_id}.{ext}"
 
 def crop_image(image, bbox):
     """Crop image to the bounding box coordinates with padding."""
@@ -97,7 +105,7 @@ def crop_image(image, bbox):
     return image[y1:y2, x1:x2]
 
 def preprocess_image(image):
-    """EXACT SAME preprocessing as standalone script"""
+    
     if image is None:
         return None
     # Convert to grayscale
@@ -110,6 +118,7 @@ def preprocess_image(image):
     kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
     sharpened = cv2.filter2D(resized, -1, kernel)
     return sharpened
+
 def extract_text_from_region(image, output_dir, cls_name, detection_num):
     """Enhanced text extraction with better preprocessing and OCR handling"""
     if image is None or image.size == 0:
@@ -213,10 +222,9 @@ def extract_text_from_region(image, output_dir, cls_name, detection_num):
     except Exception as e:
         logger.error(f"Extraction failed: {str(e)}")
         return [], None
-        
 
 def process_image(image, output_dir, filename):
-    """Process image with EXACT SAME logic as standalone script"""
+    
     try:
         # Same confidence threshold as standalone
         results = yolo_model.predict(source=image, conf=0.5)
@@ -272,7 +280,7 @@ def process_image(image, output_dir, filename):
                 rect = plt.Rectangle((x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor='red', linewidth=2)
                 ax_main.add_patch(rect)
 
-                text_label = f"Date #{detections} (Conf: {conf:.2f})\n"
+                text_label = f"Date #{detections} \n"
                 if text_results:
                     text_label += "\n".join([f"{text} (OCR: {text_conf:.2f})" for text, text_conf in text_results])
                 else:
@@ -325,12 +333,86 @@ def process_image(image, output_dir, filename):
         'num_detections': detections
     }
 
-# Flask routes
+# API Endpoints
+@app.route('/api/upload', methods=['POST'])
+def api_upload():
+    """API endpoint for image upload and processing"""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+    
+    file = request.files['file']
+    if not file or file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+    
+    if not allowed_file(file.filename):
+        return jsonify({'error': 'File type not allowed'}), 400
+    
+    try:
+        # Generate unique filename to prevent collisions
+        filename = generate_unique_filename(secure_filename(file.filename))
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(filepath)
+
+        image = cv2.imread(filepath)
+        if image is None:
+            return jsonify({'error': 'Invalid image file'}), 400
+
+        result = process_image(image, app.config['CROPPED_FOLDER'], filename)
+        result['original_image'] = f"/{filepath}"
+        
+        # Save processed image
+        processed_filename = f"processed_{filename}"
+        processed_path = os.path.join(app.config['PROCESSED_FOLDER'], processed_filename)
+        cv2.imwrite(processed_path, image)
+        result['processed_image'] = f"/{processed_path}"
+
+        return jsonify(result)
+    
+    except Exception as e:
+        logger.error(f"API processing error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/capture', methods=['POST'])
+def api_capture():
+    """API endpoint for processing captured images"""
+    if not request.is_json:
+        return jsonify({'error': 'Request must be JSON'}), 400
+    
+    data = request.get_json()
+    if not data or 'image_data' not in data:
+        return jsonify({'error': 'No image data provided'}), 400
+    
+    try:
+        image_data = data['image_data']
+        if not image_data.startswith('data:image/'):
+            return jsonify({'error': 'Invalid image data format'}), 400
+
+        header, encoded = image_data.split(",", 1)
+        image_bytes = base64.b64decode(encoded)
+        if len(image_bytes) > 12 * 1024 * 1024:
+            return jsonify({'error': 'Image too large (max 12MB)'}), 400
+
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if image is None:
+            return jsonify({'error': 'Could not decode image'}), 400
+
+        filename = f"capture_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        cv2.imwrite(filepath, image)
+
+        result = process_image(image, app.config['CROPPED_FOLDER'], filename)
+        result['original_image'] = f"/{filepath}"
+        
+        return jsonify(result)
+    
+    except Exception as e:
+        logger.error(f"API capture error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# Web Routes
 @app.route('/', methods=['GET', 'POST'])
 def upload_file():
-    global yolo_model, paddle_ocr, easy_reader
-    # Reset models (optional)
-    yolo_model, paddle_ocr, easy_reader = initialize_models()
     if request.method == 'POST':
         if 'file' not in request.files:
             flash('No file selected')
@@ -342,7 +424,7 @@ def upload_file():
             return redirect(request.url)
 
         try:
-            filename = secure_filename(file.filename)
+            filename = generate_unique_filename(secure_filename(file.filename))
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(filepath)
 
@@ -366,9 +448,6 @@ def upload_file():
 
 @app.route('/capture', methods=['GET', 'POST'])
 def capture():
-    global yolo_model, paddle_ocr, easy_reader
-    # Reset models (optional)
-    yolo_model, paddle_ocr, easy_reader = initialize_models()
     if request.method == 'POST':
         image_data = request.form.get('image_data')
         if not image_data:
@@ -404,10 +483,5 @@ def capture():
 
     return render_template('capture.html')
 
-
-
-
 if __name__ == '__main__':
-    
-    # Run Flask app
-    app.run(host='0.0.0.0', port=5000, threaded=False)
+    app.run(host='0.0.0.0', port=5000, threaded=True)
